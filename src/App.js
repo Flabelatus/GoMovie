@@ -17,7 +17,7 @@ function App() {
   }
 
   return (
-    <div className="container">
+    <div className="p-3 mb-2 bg-dark text-white">
       <div className="row">
         <div className="col">
 

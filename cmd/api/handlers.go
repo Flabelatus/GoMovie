@@ -1,11 +1,11 @@
 package main
 
 import (
-	"backend/internal/models"
-	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
-	"time"
+	"strconv"
+
+	"github.com/golang-jwt/jwt/v4"
 )
 
 func (app *application) Home(w http.ResponseWriter, r *http.Request) {
@@ -20,49 +20,111 @@ func (app *application) Home(w http.ResponseWriter, r *http.Request) {
 		Version: "1.0.0",
 	}
 
-	toJson(payload, w)
+	_ = app.writeJSON(w, http.StatusOK, payload)
 }
 
 func (app *application) AllMovies(w http.ResponseWriter, r *http.Request) {
-	var movies []models.Movie
-
-	rd, _ := time.Parse("2006-01-02", "1986-03-07")
-
-	highLander := models.Movie{
-		ID:           1,
-		Title:        "Highlander",
-		ResealseDate: rd,
-		RunTime:      116,
-		MPAARating:   "R",
-		Description:  "A very nice movie",
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+	movies, err := app.DB.AllMovies()
+	if err != nil {
+		app.errorJSON(w, err)
+		return
 	}
 
-	movies = append(movies, highLander)
-
-	rd, _ = time.Parse("2006-01-02", "1981-06-12")
-	rtola := models.Movie{
-		ID:           2,
-		Title:        "Raiders of the Lost Ark",
-		ResealseDate: rd,
-		RunTime:      115,
-		MPAARating:   "PG-13",
-		Description:  "Another very nice movie",
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
-	}
-	movies = append(movies, rtola)
-
-	toJson(movies, w)
+	_ = app.writeJSON(w, http.StatusOK, movies)
 }
 
-func toJson(payload interface{}, w http.ResponseWriter) {
-	out, err := json.Marshal(payload)
-	if err != nil {
-		fmt.Println(err)
+func (app *application) authenticate(w http.ResponseWriter, r *http.Request) {
+	// Read the JSON paylaod
+	var parsedData struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(out)
+
+	err := app.readJSON(w, r, &parsedData)
+	if err != nil {
+		app.errorJSON(w, err, http.StatusBadRequest)
+		return
+	}
+
+	// Validate user against the Database
+	user, err := app.DB.GetUserByEmail(parsedData.Email)
+	if err != nil {
+		app.errorJSON(w, errors.New("invalid credentials 1"), http.StatusBadRequest)
+		return
+	}
+
+	// Check password
+	valid, err := user.PasswordMatches(parsedData.Password)
+	// if an error shows up or result of password is not valid
+	if err != nil || !valid {
+		app.errorJSON(w, errors.New("invalid credentials 2"), http.StatusBadRequest)
+		return
+	}
+
+	// Create a JWT user
+	u := jwtUser{
+		ID:        user.ID,
+		FirstName: user.FirstName,
+		LastName:  user.LastName,
+	}
+
+	// generate tokens
+	tokens, err := app.auth.GenerateTokenPair(&u)
+	if err != nil {
+		app.errorJSON(w, err)
+		return
+	}
+
+	refreshCookie := app.auth.GetRefreshCookie(tokens.RefreshToken)
+	http.SetCookie(w, refreshCookie)
+
+	app.writeJSON(w, http.StatusAccepted, tokens)
+
+}
+
+func (app *application) refreshToken(w http.ResponseWriter, r *http.Request) {
+	// Refresh the token
+	for _, cookie := range r.Cookies() {
+		if cookie.Name == app.auth.CookieName {
+			claims := &Claims{}
+			refreshToken := cookie.Value
+
+			// Parse the token to get the claims
+			_, err := jwt.ParseWithClaims(refreshToken, claims, func(token *jwt.Token) (interface{}, error) {
+				return []byte(app.JWTSecret), nil
+			})
+			if err != nil {
+				app.errorJSON(w, errors.New("unauthorized"), http.StatusUnauthorized)
+				return
+			}
+
+			// get the user id from the token claims
+			userID, err := strconv.Atoi(claims.Subject)
+			if err != nil {
+				app.errorJSON(w, errors.New("unknown user"), http.StatusUnauthorized)
+				return
+			}
+
+			user, err := app.DB.GetUserByID(userID)
+			if err != nil {
+				app.errorJSON(w, errors.New("unknown user"), http.StatusUnauthorized)
+				return
+			}
+			u := jwtUser{
+				ID:        user.ID,
+				FirstName: user.FirstName,
+				LastName:  user.LastName,
+			}
+
+			tokenPairs, err := app.auth.GenerateTokenPair(&u)
+			if err != nil {
+				app.errorJSON(w, errors.New("error generating tokens"), http.StatusUnauthorized)
+				return
+			}
+
+			http.SetCookie(w, app.auth.GetRefreshCookie(tokenPairs.RefreshToken))
+
+			app.writeJSON(w, http.StatusOK, tokenPairs)
+		}
+	}
 }
