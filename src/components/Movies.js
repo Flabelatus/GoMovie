@@ -30,7 +30,7 @@ const Movies = () => {
         <div>
             <h2>Movies</h2>
             <hr />
-            <table className="table table-striped table-hover">
+            <table className="table table-dark table-hover">
                 <thead>
                     <tr>
                         <th>Movies</th>
